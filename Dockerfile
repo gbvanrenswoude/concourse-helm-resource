@@ -3,9 +3,10 @@ LABEL maintainer "mario.siegenthaler@linkyard.ch"
 
 RUN apk add --update --upgrade --no-cache jq bash curl
 
-RUN apk add --no-cache ca-certificates
-COPY certs /usr/local/share/ca-certificates/
-RUN update-ca-certificates
+# If you need corporate certs, add a certs folder and put your certs in there.
+# RUN apk add --no-cache ca-certificates
+# COPY certs /usr/local/share/ca-certificates/
+# RUN update-ca-certificates
 
 RUN apk -v --update add \
         python \
