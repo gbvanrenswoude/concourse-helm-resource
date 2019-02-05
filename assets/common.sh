@@ -1,8 +1,37 @@
 #!/bin/bash
 set -e
 
+generate_awscli_kubeconfig() {
+  # Optional. Use the AWS EKS authenticator
+  assume_aws_role=$(jq -r '.source.assume_aws_role // ""' < $payload)
+  aws_region=$(jq -r '.source.aws_region // ""' < $payload)
+  if [ ! -z "$assume_aws_role" ]; then
+    if [ -z "$aws_region" ]; then
+      echo 'No aws region specified in the source configuration with parameter aws_region. Defaulting to eu-west-1.'
+      aws_region="eu-west-1"
+    fi
+    echo "Assuming aws role with arn $assume_aws_role"
+    export temp_credentials=$(aws sts assume-role --role-arn $assume_aws_role --role-session-name concourse-helm-resource-session)
+    export AWS_ACCESS_KEY_ID=$(echo ${temp_credentials} | jq -r '.Credentials.AccessKeyId') AWS_SESSION_TOKEN=$(echo ${temp_credentials} | jq -r '.Credentials.SessionToken') AWS_SECRET_ACCESS_KEY=$(echo ${temp_credentials} | jq -r ' .Credentials.SecretAccessKey') AWS_DEFAULT_REGION=$aws_region
+  fi
+  local aws_eks_cluster_name
+  aws_eks_cluster_name="$(jq -r '.source.aws_eks_cluster_name // ""' < "$payload")"
+  aws eks update-kubeconfig --name $aws_eks_cluster_name
+}
+
 generate_aws_kubeconfig() {
   # Optional. Use the AWS EKS authenticator
+  assume_aws_role=$(jq -r '.source.assume_aws_role // ""' < $payload)
+  aws_region=$(jq -r '.source.aws_region // ""' < $payload)
+  if [ ! -z "$assume_aws_role" ]; then
+    if [ -z "$aws_region" ]; then
+      echo 'No aws region specified in the source configuration with parameter aws_region. Defaulting to eu-west-1.'
+      aws_region="eu-west-1"
+    fi
+    echo "Assuming aws role with arn $assume_aws_role"
+    export temp_credentials=$(aws sts assume-role --role-arn $assume_aws_role --role-session-name concourse-helm-resource-session)
+    export AWS_ACCESS_KEY_ID=$(echo ${temp_credentials} | jq -r '.Credentials.AccessKeyId') AWS_SESSION_TOKEN=$(echo ${temp_credentials} | jq -r '.Credentials.SessionToken') AWS_SECRET_ACCESS_KEY=$(echo ${temp_credentials} | jq -r ' .Credentials.SecretAccessKey') AWS_DEFAULT_REGION=$aws_region
+  fi
   local use_aws_iam_authenticator
   use_aws_iam_authenticator="$(jq -r '.source.use_aws_iam_authenticator // ""' < "$payload")"
   local aws_eks_cluster_name
@@ -43,8 +72,30 @@ EOF
 }
 
 setup_kubernetes() {
+  # handle proxy if set
+  proxy_url=$(jq -r '.source.proxy_url // ""' < $payload)
+  no_proxy_config=$(jq -r '.source.no_proxy_config // ""' < $payload)
+  use_awscli_eks_auth="$(jq -r '.source.use_awscli_eks_auth // "false"' < "$payload")"
+  if [ ! -z "$proxy_url" ]; then
+    echo "setting http and https proxy"
+    export http_proxy=$proxy_url
+    export https_proxy=$proxy_url
+  fi
+  if [ ! -z "$no_proxy_config" ]; then
+    echo "setting no_proxy"
+    export no_proxy=$no_proxy_config
+  fi
   payload=$1
   source=$2
+
+  # shortcut using awscli for eks
+  if [ "$use_awscli_eks_auth" = true ]; then
+    echo "skipping all and using aws cli to generate kubeconfig"
+    generate_awscli_kubeconfig
+    kubectl version
+    return 0
+  fi
+
   # Setup kubectl
   cluster_url=$(jq -r '.source.cluster_url // ""' < $payload)
   if [ -z "$cluster_url" ]; then
@@ -59,7 +110,6 @@ setup_kubernetes() {
     token=$(jq -r '.source.token // ""' < $payload)
     token_path=$(jq -r '.params.token_path // ""' < $payload)
     use_aws_iam_authenticator="$(jq -r '.source.use_aws_iam_authenticator // ""' < "$payload")"
-
 
     mkdir -p /root/.kube
 
@@ -145,12 +195,14 @@ setup_helm() {
     wait_for_service_up tiller-deploy 10
   else
     export HELM_HOST=$(jq -r '.source.helm_host // ""' < $1)
-    helm init -c --tiller-namespace $tiller_namespace > /dev/null
+    echo "doing helm init"
+    helm init -c  --skip-refresh --tiller-namespace $tiller_namespace
   fi
   if [ "$tls_enabled" = true ]; then
     helm version --tls --tiller-namespace $tiller_namespace
   else
-    helm version --tiller-namespace $tiller_namespace
+    echo "doing helm version"
+    helm version --debug --tiller-namespace $tiller_namespace
   fi
 }
 
@@ -197,4 +249,5 @@ setup_resource() {
   setup_tls $1
   setup_helm $1
   setup_repos $1
+  echo "All done. Let's do a proper deploy."
 }
